@@ -18,7 +18,7 @@ class App:
         self._create_layout()
 
     def _configure_appearance(self):
-        ctk.set_appearance_mode("System")
+        ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
 
     def _configure_fonts(self):

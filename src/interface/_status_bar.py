@@ -1,12 +1,15 @@
 import customtkinter as ctk
 
+from .theme import Theme
+
 
 class StatusBar(ctk.CTkFrame):
     def __init__(self, master):
         super().__init__(
             master,
             height=30,
-            corner_radius=0
+            corner_radius=0,
+            fg_color=Theme.STATUS_BACKGROUND
         )
 
         self._create_widgets()

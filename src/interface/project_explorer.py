@@ -1,11 +1,14 @@
 import customtkinter as ctk
 
+from .theme import Theme
+
 
 class ProjectExplorer(ctk.CTkFrame):
     def __init__(self, master):
         super().__init__(
             master,
-            corner_radius=0
+            corner_radius=0,
+            fg_color=Theme.EXPLORER_BACKGROUND
         )
 
         self._create_widgets()
