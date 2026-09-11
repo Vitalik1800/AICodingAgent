@@ -110,7 +110,20 @@ class Chat(ctk.CTkFrame):
 
     def _generate_response(self, message):
         try:
-            response = self.agent.ask(message)
+            structure = self.agent.get_project_structure()
+
+            project_context = "\n".join(
+                f"{item.item_type}: {item.path}"
+                for item in structure
+            )
+
+            prompt = (
+                "PROJECT_STRUCTURE:\n"
+                f"{project_context}\n\n"
+                f"USER REQUEST:\n{message}"
+            )
+
+            response = self.agent.ask(prompt)
 
             self.after(
                 0,
