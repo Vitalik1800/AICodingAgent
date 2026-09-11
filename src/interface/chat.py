@@ -3,6 +3,7 @@ import threading
 import customtkinter as ctk
 
 from .theme import Theme
+from ..agent.agent import Agent
 from ..ai.ollama_client import OllamaClient
 
 
@@ -15,7 +16,9 @@ class Chat(ctk.CTkFrame):
         )
 
         self.on_status_change = on_status_change
-        self.ollama_client = OllamaClient()
+        self.agent = Agent(
+            OllamaClient()
+        )
 
         self._create_widgets()
 
@@ -107,7 +110,7 @@ class Chat(ctk.CTkFrame):
 
     def _generate_response(self, message):
         try:
-            response = self.ollama_client.generate(message)
+            response = self.agent.ask(message)
 
             self.after(
                 0,
