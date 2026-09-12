@@ -1,4 +1,5 @@
 import customtkinter as ctk
+from tkinter import filedialog
 
 from .chat import Chat
 from .project_explorer import ProjectExplorer
@@ -12,6 +13,8 @@ class App:
         self.root.title("AI Coding Agent")
         self.root.geometry("1000x650")
         self.root.minsize(800, 500)
+
+        self.project_path = None
 
         self._configure_appearance()
         self._configure_fonts()
@@ -56,7 +59,7 @@ class App:
             weight=0
         )
 
-        self.project_explorer = ProjectExplorer(self.root)
+        self.project_explorer = ProjectExplorer(self.root, on_project_select=self._select_project)
         self.project_explorer.grid(
             row=0,
             column=0,
@@ -65,7 +68,8 @@ class App:
 
         self.chat = Chat(
             self.root,
-            on_status_change=self._handle_status_change
+            on_status_change=self._handle_status_change,
+            project_path="."
         )
         self.chat.grid(
             row=0,
@@ -81,6 +85,28 @@ class App:
             column=0,
             columnspan=2,
             sticky="ew"
+        )
+
+    def _select_project(self):
+        selected_path = filedialog.askdirectory(
+            title="Select Project"
+        )
+
+        if not selected_path:
+            return
+
+        self.project_path = selected_path
+
+        self.project_explorer.set_project_path(
+            selected_path
+        )
+
+        self.chat.set_project_path(
+            selected_path
+        )
+
+        self._handle_status_change(
+            f"Project selected: {selected_path}"
         )
 
     def _handle_status_change(self, status):

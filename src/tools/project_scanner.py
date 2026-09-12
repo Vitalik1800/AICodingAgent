@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from .project_structure import ProjectItem
+from .project_structure import ProjectItem, ProjectTreeNode
 
 
 class ProjectScanner:
@@ -10,7 +10,8 @@ class ProjectScanner:
         ".idea",
         "__pycache__",
         "data",
-        "logs"
+        "logs",
+        "node_modules"
     }
 
     def __init__(self, project_path):
@@ -62,3 +63,37 @@ class ProjectScanner:
 
         return structure
 
+    def get_tree_structure(self):
+        return self._scan_directory(self.project_path)
+
+    def _scan_directory(self, directory):
+        nodes = []
+
+        for item in sorted(
+            directory.iterdir(),
+            key=lambda path: (
+                not path.is_dir(),
+                path.name.lower()
+            )
+        ):
+            if item.is_dir():
+                if item.name in self.DEFAULT_IGNORE_DIRS:
+                    continue
+
+                node = ProjectTreeNode(
+                    path=item,
+                    item_type="directory",
+                    children=self._scan_directory(item)
+                )
+
+                nodes.append(node)
+
+            elif item.is_file():
+                nodes.append(
+                    ProjectTreeNode(
+                        path=item,
+                        item_type="file"
+                    )
+                )
+
+        return nodes

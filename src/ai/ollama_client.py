@@ -35,7 +35,7 @@ class OllamaClient:
                 "prompt": prompt,
                 "stream": False
             },
-            timeout=120
+            timeout=6000
         )
 
         response.raise_for_status()
