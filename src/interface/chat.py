@@ -3,16 +3,17 @@ import threading
 import customtkinter as ctk
 
 from ..agent.agent import Agent
+from ..agent.project_context_builder import ProjectContextBuilder
 from ..ai.ollama_client import OllamaClient
 from .theme import Theme
 
 
 class Chat(ctk.CTkFrame):
     def __init__(
-        self,
-        master,
-        on_status_change=None,
-        project_path="."
+            self,
+            master,
+            on_status_change=None,
+            project_path="."
     ):
         super().__init__(
             master,
@@ -23,9 +24,15 @@ class Chat(ctk.CTkFrame):
         self.on_status_change = on_status_change
         self.project_path = project_path
 
+        self.context_builder = ProjectContextBuilder()
+        self.project_context = self.context_builder.build(
+            project_path
+        )
+
         self.agent = Agent(
             OllamaClient(),
-            project_path
+            project_path,
+            self.project_context
         )
 
         self._create_widgets()
@@ -131,7 +138,7 @@ class Chat(ctk.CTkFrame):
             side="left"
         )
 
-    def _on_enter(self, event):
+    def _on_enter(self, _event):
         self._send_message()
 
     def _clear_chat(self):
@@ -156,9 +163,14 @@ class Chat(ctk.CTkFrame):
     def set_project_path(self, project_path):
         self.project_path = project_path
 
+        self.project_context = self.context_builder.build(
+            project_path
+        )
+
         self.agent = Agent(
             OllamaClient(),
-            project_path
+            project_path,
+            self.project_context
         )
 
     def _send_message(self):
@@ -188,10 +200,19 @@ class Chat(ctk.CTkFrame):
 
         thread.start()
 
+    def list_files(self):
+        return self.agent.list_files()
+
+    def read_file(self, file_path):
+        return self.agent.read_file(file_path)
+
+    def search_code(self, query):
+        return self.agent.search_code(query)
+
     def _generate_response(self, message):
         try:
             if message == "/list":
-                result = self.agent.list_files()
+                result = self.list_files()
                 response = self._format_tool_result(result)
 
             elif message.startswith("/read "):
@@ -200,7 +221,7 @@ class Chat(ctk.CTkFrame):
                 if not file_path:
                     response = "Usage: /read <file_path>"
                 else:
-                    result = self.agent.read_file(file_path)
+                    result = self.read_file(file_path)
                     response = self._format_tool_result(result)
 
             elif message.startswith("/search "):
@@ -209,7 +230,7 @@ class Chat(ctk.CTkFrame):
                 if not query:
                     response = "Usage: /search <query>"
                 else:
-                    result = self.agent.search_code(query)
+                    result = self.search_code(query)
                     response = self._format_tool_result(result)
 
             else:
@@ -229,20 +250,7 @@ class Chat(ctk.CTkFrame):
             )
 
     def _generate_ai_response(self, message):
-        structure = self.agent.get_project_structure()
-
-        project_context = "\n".join(
-            f"{item.item_type}: {item.path}"
-            for item in structure
-        )
-
-        prompt = (
-            "PROJECT_STRUCTURE:\n"
-            f"{project_context}\n\n"
-            f"USER REQUEST:\n{message}"
-        )
-
-        return self.agent.ask(prompt)
+        return self.agent.run_tool_loop(message)
 
     def _format_tool_result(self, tool_result):
         if not tool_result.success:

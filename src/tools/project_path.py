@@ -9,7 +9,28 @@ class ProjectPath:
         "__pycache__",
         "data",
         "logs",
-        "node_modules"
+        "node_modules",
+        "bin",
+        "obj",
+        "release",
+        "dist",
+        "build",
+    }
+
+    DEFAULT_IGNORE_FILES = {
+        ".lock",
+    }
+
+    DEFAULT_IGNORE_EXTENSIONS = {
+        ".dll",
+        ".exe",
+        ".pdb",
+        ".map",
+    }
+
+    DEFAULT_IGNORE_SUFFIXES = {
+        ".min.js",
+        ".min.css",
     }
 
     def __init__(self, path="."):
@@ -50,7 +71,25 @@ class ProjectPath:
         except ValueError:
             return True
 
-        return any(
+        if any(
             part in self.DEFAULT_IGNORE_DIRS
             for part in relative.parts
-        )
+        ):
+            return True
+
+        if path.is_file():
+            name = path.name.lower()
+
+            if name in self.DEFAULT_IGNORE_FILES:
+                return True
+
+            if path.suffix.lower() in self.DEFAULT_IGNORE_EXTENSIONS:
+                return True
+
+            if any(
+                name.endswith(suffix)
+                for suffix in self.DEFAULT_IGNORE_SUFFIXES
+            ):
+                return True
+
+        return False
