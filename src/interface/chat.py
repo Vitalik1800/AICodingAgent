@@ -1,8 +1,10 @@
 import threading
+import traceback
 
 import customtkinter as ctk
 
 from ..agent.agent import Agent
+from ..agent.message import Message
 from ..agent.project_context_builder import ProjectContextBuilder
 from ..ai.ollama_client import OllamaClient
 from .theme import Theme
@@ -10,10 +12,13 @@ from .theme import Theme
 
 class Chat(ctk.CTkFrame):
     def __init__(
-            self,
-            master,
-            on_status_change=None,
-            project_path="."
+        self,
+        master,
+        on_status_change=None,
+        on_patch_preview=None,
+        project_path=".",
+        chat_history_storage=None,
+        chat_history_manager=None
     ):
         super().__init__(
             master,
@@ -22,20 +27,29 @@ class Chat(ctk.CTkFrame):
         )
 
         self.on_status_change = on_status_change
+        self.on_patch_preview = on_patch_preview
         self.project_path = project_path
+        self.active_chat = None
+        self.is_generating = False
+        self.generation_id = 0
+        self.chat_history_storage = chat_history_storage
+        self.chat_history_manager = chat_history_manager
 
         self.context_builder = ProjectContextBuilder()
-        self.project_context = self.context_builder.build(
-            project_path
-        )
-
-        self.agent = Agent(
-            OllamaClient(),
-            project_path,
-            self.project_context
-        )
+        self.agent = self._create_agent()
 
         self._create_widgets()
+
+    def _create_agent(self):
+        self.project_context = self.context_builder.build(
+            self.project_path
+        )
+
+        return Agent(
+            OllamaClient(),
+            self.project_path,
+            self.project_context
+        )
 
     def _create_widgets(self):
         title_label = ctk.CTkLabel(
@@ -138,11 +152,59 @@ class Chat(ctk.CTkFrame):
             side="left"
         )
 
+    def set_active_chat(self, chat_history):
+        self.active_chat = chat_history
+
+    def load_chat_history(self, chat_history):
+        self.active_chat = chat_history
+
+        self.chat_history.configure(
+            state="normal"
+        )
+
+        self.chat_history.delete(
+            "1.0",
+            "end"
+        )
+
+        self.agent.clear_conversation()
+
+        for message in chat_history.messages:
+            if message.role == "user":
+                self.chat_history.insert(
+                    "end",
+                    f"You: \n{message.content}\n\n"
+                )
+            elif message.role == "assistant":
+                self.chat_history.insert(
+                    "end",
+                    f"AI: \n{message.content}\n\n"
+                )
+            elif message.role == "tool":
+                self.chat_history.insert(
+                    "end",
+                    f"Tool: \n{message.content}\n\n"
+                )
+
+            self.agent.conversation.add_message(
+                message.role,
+                message.content
+            )
+
+        self.chat_history.configure(
+            state="disabled"
+        )
+
+        self.chat_history.see("end")
+
     def _on_enter(self, _event):
         self._send_message()
 
     def _clear_chat(self):
         self.agent.clear_conversation()
+
+        if self.active_chat is not None:
+            self.active_chat.messages.clear()
 
         self.chat_history.configure(
             state="normal"
@@ -162,22 +224,17 @@ class Chat(ctk.CTkFrame):
 
     def set_project_path(self, project_path):
         self.project_path = project_path
-
-        self.project_context = self.context_builder.build(
-            project_path
-        )
-
-        self.agent = Agent(
-            OllamaClient(),
-            project_path,
-            self.project_context
-        )
+        self.agent = self._create_agent()
 
     def _send_message(self):
         message = self.message_entry.get().strip()
 
         if not message:
             return
+
+        self.is_generating = True
+        self.generation_id += 1
+        generation_id = self.generation_id
 
         if self.on_status_change:
             self.on_status_change("Thinking...")
@@ -187,14 +244,39 @@ class Chat(ctk.CTkFrame):
             message
         )
 
+        if self.active_chat is not None:
+            self.active_chat.messages.append(
+                Message(
+                    role="user",
+                    content=message
+                )
+            )
+
+        if (
+            self.active_chat is not None
+            and self.chat_history_storage is not None
+            and self.chat_history_manager is not None
+        ):
+            self.chat_history_storage.save(
+                self.chat_history_manager.get_all_chats()
+            )
+
         self.message_entry.delete(
             0,
             "end"
         )
 
+        generation_agent = self.agent
+        generation_chat = self.active_chat
+
         thread = threading.Thread(
             target=self._generate_response,
-            args=(message,),
+            args=(
+                message,
+                generation_id,
+                generation_agent,
+                generation_chat
+            ),
             daemon=True
         )
 
@@ -209,10 +291,74 @@ class Chat(ctk.CTkFrame):
     def search_code(self, query):
         return self.agent.search_code(query)
 
-    def _generate_response(self, message):
+    def apply_pending_modifications(self):
+        modifications = self.agent.get_pending_modifications()
+
+        if modifications is None:
+            raise ValueError(
+                "No pending modifications to apply."
+            )
+
+        results = self.agent.apply_modifications(
+            modifications
+        )
+
+        failed_results = [
+            result
+            for result in results
+            if result.is_failure
+        ]
+
+        if failed_results:
+            error_messages = "\n".join(
+                f"{result.file_path}: {result.message}"
+                for result in failed_results
+            )
+
+            if self.on_status_change:
+                self.on_status_change(
+                    f"Apply failed:\n{error_messages}"
+                )
+
+        self.agent.pending_modifications = None
+
+        return results
+
+    def _update_patch_preview(self):
+        if self.on_patch_preview is None:
+            print("[CHAT] Patch preview callback is not configured.")
+            return
+
+        previews = self.agent.get_patch_previews()
+
+        print(
+            f"[CHAT] Patch previews received: {len(previews)}"
+        )
+
+        for preview in previews:
+            print(
+                f"[CHAT] Preview: "
+                f"{preview.file_path} | "
+                f"{preview.modification_type} | "
+                f"content_length={len(preview.patch_content)}"
+            )
+
+        self.after(
+            0,
+            self.on_patch_preview,
+            previews
+        )
+
+    def _generate_response(
+        self,
+        message,
+        generation_id,
+        generation_agent,
+        generation_chat
+    ):
         try:
             if message == "/list":
-                result = self.list_files()
+                result = generation_agent.list_files()
                 response = self._format_tool_result(result)
 
             elif message.startswith("/read "):
@@ -221,7 +367,7 @@ class Chat(ctk.CTkFrame):
                 if not file_path:
                     response = "Usage: /read <file_path>"
                 else:
-                    result = self.read_file(file_path)
+                    result = generation_agent.read_file(file_path)
                     response = self._format_tool_result(result)
 
             elif message.startswith("/search "):
@@ -230,16 +376,26 @@ class Chat(ctk.CTkFrame):
                 if not query:
                     response = "Usage: /search <query>"
                 else:
-                    result = self.search_code(query)
+                    result = generation_agent.search_code(query)
                     response = self._format_tool_result(result)
 
             else:
-                response = self._generate_ai_response(message)
+                response = generation_agent.run_tool_loop(message)
+
+            if generation_id != self.generation_id:
+                return
+
+            self.after(
+                0,
+                self._update_patch_preview_for_generation,
+                generation_agent
+            )
 
             self.after(
                 0,
                 self._handle_response,
-                response
+                response,
+                generation_chat
             )
 
         except Exception as error:
@@ -249,8 +405,26 @@ class Chat(ctk.CTkFrame):
                 error
             )
 
-    def _generate_ai_response(self, message):
-        return self.agent.run_tool_loop(message)
+    def _update_patch_preview_for_generation(self, generation_agent):
+        if self.on_patch_preview is None:
+            print("[CHAT] Patch preview callback is not configured.")
+            return
+
+        previews = generation_agent.get_patch_previews()
+
+        print(
+            f"[CHAT] Patch previews received: {len(previews)}"
+        )
+
+        for preview in previews:
+            print(
+                f"[CHAT] Preview: "
+                f"{preview.file_path} | "
+                f"{preview.modification_type} | "
+                f"content_length={len(preview.patch_content)}"
+            )
+
+        self.on_patch_preview(previews)
 
     def _format_tool_result(self, tool_result):
         if not tool_result.success:
@@ -266,20 +440,45 @@ class Chat(ctk.CTkFrame):
             f"Result:\n{tool_result.result}"
         )
 
-    def _handle_response(self, response):
-        self._append_message(
-            "AI",
-            response
-        )
+    def _handle_response(self, response, generation_chat):
+        if generation_chat is not None:
+            generation_chat.messages.append(
+                Message(
+                    role="assistant",
+                    content=response
+                )
+            )
+
+        if (
+            generation_chat is not None
+            and self.chat_history_storage is not None
+            and self.chat_history_manager is not None
+        ):
+            self.chat_history_storage.save(
+                self.chat_history_manager.get_all_chats()
+            )
+
+        if generation_chat is self.active_chat:
+            self._append_message(
+                "AI",
+                response
+            )
+
+        self.is_generating = False
 
         if self.on_status_change:
             self.on_status_change("Ready")
 
     def _handle_error(self, error):
+        print("[CHAT] ERROR TRACEBACK:")
+        traceback.print_exc()
+
         self._append_message(
             "Error",
             str(error)
         )
+
+        self.is_generating = False
 
         if self.on_status_change:
             self.on_status_change("Error")

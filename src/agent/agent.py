@@ -8,8 +8,12 @@ from .tool_call_parser import ToolCallParser
 from .conversation import Conversation
 from .prompt_builder import PromptBuilder
 from .final_answer_parser import FinalAnswerParser
-from .project_context import ProjectContext
 from .context_formatter import ContextFormatter
+from .modification_pipeline import ModificationPipeline
+from .modification_response_parser import ModificationResponseParser
+from copy import deepcopy
+from .apply_patch_service import ApplyPatchService
+from .modification_request_validator import ModificationRequestValidator
 
 
 class Agent:
@@ -27,6 +31,12 @@ class Agent:
         )
 
         self.project_scanner = ProjectScanner(project_path)
+        self.modification_pipeline = ModificationPipeline(project_path)
+        self.modification_response_parser = ModificationResponseParser(project_path)
+        self.apply_patch_service = ApplyPatchService(project_path)
+        self.modification_request_validator = ModificationRequestValidator()
+        self.patch_previews = []
+        self.pending_modifications = None
 
         self.list_files_tool = ListFilesTool(project_path)
         self.read_file_tool = ReadFileTool(project_path)
@@ -149,6 +159,33 @@ class Agent:
                 success=False,
                 error=str(error)
             )
+
+    def preview_modification(self, modification):
+        preview = self.modification_pipeline.process_preview(
+            modification
+        )
+
+        self.patch_previews = [preview]
+
+        return preview
+
+    def preview_modifications(self, modifications):
+        previews = self.modification_pipeline.process_previews(
+            modifications
+        )
+
+        self.patch_previews = previews.copy()
+
+        return previews
+
+    def get_patch_previews(self):
+        return deepcopy(self.patch_previews)
+
+    def get_pending_modifications(self):
+        if self.pending_modifications is None:
+            return None
+
+        return deepcopy(self.pending_modifications)
 
     def select_tool(self, message):
         definitions = self.tool_registry.get_definitions()
@@ -293,6 +330,66 @@ class Agent:
 
         return self.llm_client.generate(prompt).strip()
 
+    def _process_modification_response(self, response):
+        modification_response = (
+            self.modification_response_parser.parse(
+                response
+            )
+        )
+
+        self.pending_modifications = modification_response
+
+        previews = self.preview_modifications(
+            modification_response
+        )
+
+        print(
+            f"[AGENT] Generated {len(previews)} "
+            f"patch preview(s)."
+        )
+
+        return previews
+
+    def _is_modification_request(self, message):
+        if not isinstance(message, str):
+            return False
+
+        text = message.lower().strip()
+
+        modification_keywords = (
+            "створи файл",
+            "створити файл",
+            "створи новий файл",
+            "створити новий файл",
+            "зміни файл",
+            "змінити файл",
+            "відредагуй файл",
+            "відредагувати файл",
+            "онови файл",
+            "оновити файл",
+            "видали файл",
+            "видалити файл",
+            "create file",
+            "create a file",
+            "create new file",
+            "create a new file",
+            "update file",
+            "update the file",
+            "edit file",
+            "edit the file",
+            "modify file",
+            "modify the file",
+            "delete file",
+            "delete the file",
+            "remove file",
+            "remove the file",
+        )
+
+        return any(
+            keyword in text
+            for keyword in modification_keywords
+        )
+
     def run_tool_loop(self, message, max_tool_calls=5):
         self.conversation.add_message(
             "user",
@@ -310,37 +407,129 @@ class Agent:
             print(response)
 
             try:
-                tool_call = self.tool_call_parser.parse(response)
+                tool_call = self.tool_call_parser.parse(
+                    response
+                )
 
             except ValueError:
                 try:
-                    final_answer = self.final_answer_parser.parse(
-                        response
+                    modification_response = (
+                        self.modification_response_parser.parse(
+                            response
+                        )
                     )
 
                 except ValueError:
+                    if self._is_modification_request(message):
+                        print(
+                            "[AGENT] Modification request requires "
+                            "a modification response."
+                        )
+
+                        correction_message = (
+                            "Your previous response was invalid because "
+                            "the user requested a project file modification. "
+                            "You MUST NOT return a final_answer. "
+                            "Return ONLY a valid modification response "
+                            "containing the complete file modification. "
+                            "Use the correct modification_type: "
+                            "create, update, or delete. "
+                            "Do not explain the change. "
+                            "Do not use Markdown code fences. "
+                            "Return only the JSON object."
+                        )
+
+                        self.conversation.add_message(
+                            "user",
+                            correction_message
+                        )
+
+                        continue
+
+                    try:
+                        final_answer = self.final_answer_parser.parse(
+                            response
+                        )
+
+                    except ValueError:
+                        print(
+                            "[AGENT] Response is neither a tool call, "
+                            "modification, nor a final answer."
+                        )
+
+                        self.conversation.add_message(
+                            "assistant",
+                            response
+                        )
+
+                        return response
+
                     print(
-                        "[AGENT] Response is neither a tool call "
-                        "nor a final answer."
+                        "[AGENT] Final answer received."
                     )
 
                     self.conversation.add_message(
                         "assistant",
-                        response
+                        final_answer
                     )
 
-                    return response
+                    return final_answer
+
+                try:
+                    self.modification_request_validator.validate(
+                        message,
+                        modification_response
+                    )
+
+                except ValueError as error:
+                    print(
+                        "[AGENT] Modification rejected: "
+                        f"{error}"
+                    )
+
+                    correction_message = (
+                        "Your previous modification response was invalid "
+                        "because its modification_type does not match the "
+                        "operation requested by the user. "
+                        "Return ONLY a valid modification response using "
+                        "the correct operation: create, update, or delete. "
+                        "Do not return a final_answer. "
+                        "Do not explain the change. "
+                        "Do not use Markdown code fences. "
+                        "Return only the JSON object."
+                    )
+
+                    self.conversation.add_message(
+                        "user",
+                        correction_message
+                    )
+
+                    continue
 
                 print(
-                    "[AGENT] Final answer received."
+                    "[AGENT] Modification response received."
                 )
 
                 self.conversation.add_message(
                     "assistant",
-                    final_answer
+                    response
                 )
 
-                return final_answer
+                self.pending_modifications = modification_response
+
+                previews = self.preview_modifications(
+                    modification_response
+                )
+
+                print(
+                    f"[AGENT] Generated {len(previews)} "
+                    f"patch preview(s)."
+                )
+
+                return (
+                    f"Generated {len(previews)} patch preview(s). "
+                    "Review the changes in the Patch Preview panel."
+                )
 
             print(
                 f"[AGENT] Tool call: {tool_call.tool}"
@@ -369,6 +558,7 @@ class Agent:
             print(
                 "[AGENT] Tool result:"
             )
+
             print(
                 self.format_tool_result(tool_result)
             )
@@ -392,90 +582,273 @@ class Agent:
         )
 
     def _build_tool_loop_prompt(self):
-        messages = self.conversation.get_messages()
+        prompt_parts = []
 
-        conversation_text = self.prompt_builder.build(
-            messages,
-            self.project_context
+        prompt_parts.append(
+            """
+    You are an AI coding agent working with a local project.
+
+    GENERAL RULES:
+    - Use tools when project information is required.
+    - Never claim that you inspected, read, created, updated, or deleted a file
+      unless the corresponding tool result confirms it.
+    - Work only with relative paths inside the project.
+    - Never access paths outside the project.
+    - Use read_file when the complete current content of an existing file is required.
+    - Use list_files when project structure information is required.
+    - Do not repeat a successful tool call when its result already contains the
+      required information.
+    """
         )
 
-        tool_definitions = self.tool_registry.get_definitions()
+        prompt_parts.append(
+            """
+    TOOL CALL FORMAT:
 
-        tools_text = ["AVAILABLE TOOLS:"]
+    Return ONLY a JSON object.
 
-        for name, definition in tool_definitions.items():
-            tools_text.append(
-                f"{name}: {definition.description}"
+    For list_files without parameters:
+    {"type":"tool_call","tool":"list_files","arguments":{}}
+
+    For read_file:
+    {"type":"tool_call","tool":"read_file","arguments":{"file_path":"src/example.py"}}
+
+    Do not use Markdown code fences.
+    Do not add explanations before or after the JSON.
+    """
+        )
+
+        prompt_parts.append(
+            """
+    MODIFICATION REQUESTS:
+
+    If the user asks to create, update, edit, modify, change, or delete a project
+    file, the final result for that request MUST be a modification response.
+
+    A modification response MUST have this structure:
+
+    {
+      "type": "modification",
+      "modifications": [
+        {
+          "file_path": "relative/path/to/file",
+          "original_content": "...",
+          "new_content": "...",
+          "description": "...",
+          "modification_type": "create"
+        }
+      ]
+    }
+
+    Allowed modification_type values:
+    - create
+    - update
+    - delete
+
+    Return ONLY the JSON object.
+    Do not use Markdown code fences.
+    Do not return final_answer for a modification request.
+    Do not explain the change.
+    """
+        )
+
+        prompt_parts.append(
+            """
+    CREATE WORKFLOW:
+
+    When the user requests creation of a file:
+
+    1. Determine whether the requested file exists if necessary.
+    2. If the file does not exist, create a modification response.
+    3. Use modification_type "create".
+    4. file_path MUST be the requested relative project path.
+    5. original_content MUST be an empty string.
+    6. new_content MUST contain the complete content of the new file.
+    7. Do not return final_answer.
+    8. Do not claim that the file has already been created.
+    9. The agent will create the file only after the modification is approved.
+    """
+        )
+
+        prompt_parts.append(
+            """
+    UPDATE WORKFLOW:
+
+    When the user requests an update, edit, or change to an existing file:
+
+    1. If the complete current file content is not already available, use read_file.
+    2. When read_file returns STATUS: success, its result contains the current file
+       content.
+    3. original_content MUST exactly match the complete content returned by
+       read_file.
+    4. new_content MUST contain the complete updated file content.
+    5. modification_type MUST be "update".
+    6. Never use an empty original_content for an existing file.
+    7. Do not call read_file again for the same file after a successful read.
+    8. Do not call list_files after a successful read when the file content is
+       already sufficient to create the modification.
+    9. The NEXT response after a successful read_file MUST be the modification JSON.
+    10. Do not return final_answer.
+    11. Do not explain the change.
+    """
+        )
+
+        prompt_parts.append(
+            """
+    DELETE WORKFLOW:
+
+    When the user requests deletion of a file:
+
+    1. If the complete current file content is not already available, use read_file.
+    2. The purpose of read_file is to obtain the exact current content required for
+       the deletion safety check.
+    3. When read_file returns STATUS: success, the complete current file content is
+       available.
+    4. After read_file returns STATUS: success, STOP USING TOOLS.
+    5. Do NOT call list_files after a successful read_file.
+    6. Do NOT call read_file again for the same file.
+    7. Do NOT call any other tool after a successful read_file.
+    8. The VERY NEXT response MUST be the modification JSON.
+    9. modification_type MUST be "delete".
+    10. file_path MUST be the requested relative project path.
+    11. original_content MUST exactly equal the complete content returned by
+        read_file.
+    12. new_content MUST be an empty string.
+    13. Do NOT return final_answer.
+    14. Do NOT claim that the file has already been deleted.
+    15. Do NOT explain the deletion.
+    16. The agent will delete the file only after the modification is approved.
+
+    MANDATORY DELETE SEQUENCE:
+
+    read_file SUCCESS
+            ↓
+    modification JSON
+            ↓
+    ModificationRequestValidator
+            ↓
+    Patch Preview
+
+    There must be NO tool call between read_file SUCCESS and modification JSON.
+    """
+        )
+
+        prompt_parts.append(
+            """
+    MANDATORY TOOL STOP CONDITION:
+
+    Once a tool has successfully returned all information required to complete the
+    user's requested modification, no additional information is needed.
+
+    For UPDATE:
+    read_file SUCCESS → modification JSON
+
+    For DELETE:
+    read_file SUCCESS → modification JSON
+
+    Do not call list_files.
+    Do not call read_file again.
+    Do not call another tool.
+    Do not return final_answer.
+    Do not explain the change.
+
+    Immediately return the modification JSON.
+    """
+        )
+
+        prompt_parts.append(
+            """
+    MODIFICATION SAFETY:
+
+    For update:
+    - original_content must exactly match the complete current file content.
+    - new_content must be the complete resulting file content.
+    - Never generate a partial file as new_content.
+
+    For delete:
+    - original_content must exactly match the complete current file content.
+    - new_content must be empty.
+    - Never use an empty original_content for an existing file.
+
+    For create:
+    - original_content must be empty.
+    - new_content must contain the complete file content.
+
+    Use only relative project paths.
+    Never modify files outside the project.
+    """
+        )
+
+        prompt_parts.append(
+            """
+    FINAL ANSWER:
+
+    A final_answer is allowed ONLY when the user's request is not a project file
+    modification request.
+
+    For a normal informational request, return:
+
+    {
+      "type": "final_answer",
+      "content": "..."
+    }
+
+    Return ONLY the JSON object.
+    Do not use Markdown code fences.
+    """
+        )
+
+        prompt_parts.append(
+            """
+    FINAL DECISION RULE:
+
+    Before responding, determine whether the user's request requires a project
+    file modification.
+
+    If YES:
+    - create/update/delete the requested file through a modification response.
+    - Never return final_answer.
+
+    If NO:
+    - answer normally through final_answer.
+
+    If a successful read_file result already provides the complete content needed
+    for an update or deletion, immediately return the modification JSON.
+    """
+        )
+
+        if self.project_context is not None:
+            prompt_parts.append(
+                "PROJECT CONTEXT:\n"
+                + self.project_context.formatted_structure
             )
 
-            if definition.parameters:
-                tools_text.append(
-                    f"Parameters: {definition.parameters}"
-                )
+        messages = self.conversation.get_messages()
 
-        tools_text.append("")
-        tools_text.append("RULES:")
-        tools_text.append(
-            "1. Use a tool when project information is required."
-        )
-        tools_text.append(
-            "2. If a requested file has not been read, use read_file first."
-        )
-        tools_text.append(
-            "3. Never claim to have inspected a file without using a tool."
-        )
-        tools_text.append(
-            "4. After a tool result, continue the task."
-        )
-        tools_text.append(
-            "5. Return ONLY valid JSON."
-        )
-        tools_text.append("")
-        tools_text.append(
-            "For a tool call, you MUST return the arguments inside the arguments field."
-        )
-        tools_text.append(
-            'The ONLY valid tool call format is: '
-            '{"type":"tool_call","tool":"TOOL_NAME","arguments":{"PARAMETER":"VALUE"}}'
-        )
-        tools_text.append(
-            'For read_file, the file path MUST be inside arguments, like this: '
-            '{"type":"tool_call","tool":"read_file","arguments":{"file_path":"package.json"}}'
-        )
-        tools_text.append(
-            "Do not put tool parameters directly at the top level."
-        )
-        tools_text.append("")
-        tools_text.append(
-            "When you have enough information, you MUST return a final_answer."
-        )
-        tools_text.append(
-            "The final response MUST contain the field type with the exact value "
-            "final_answer and the field content containing the answer."
-        )
-        tools_text.append(
-            'The ONLY valid final response format is: '
-            '{"type":"final_answer","content":"YOUR ANSWER"}'
-        )
-        tools_text.append(
-            'Do not use any other JSON structure such as '
-            '{"framework":"..."}'
-        )
-        tools_text.append("")
-        tools_text.append(
-            "Do not return plain text."
-        )
-        tools_text.append(
-            "Do not use Markdown code fences."
-        )
-        tools_text.append(
-            "Do not add text before or after the JSON."
+        return self.prompt_builder.build(
+            messages,
+            project_context=None
         )
 
-        return "\n\n".join([
-            conversation_text,
-            "\n".join(tools_text)
-        ])
+    def apply_modification(self, modification):
+        result = self.apply_patch_service.apply(
+            modification
+        )
+
+        self.patch_previews.clear()
+
+        return result
+
+    def apply_modifications(self, modifications):
+        results = self.apply_patch_service.apply_all(
+            modifications
+        )
+
+        self.patch_previews.clear()
+
+        return results
 
     def clear_conversation(self):
         self.conversation.clear()
+        self.patch_previews.clear()
+        self.pending_modifications = None
