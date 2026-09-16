@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from .patch import Patch
+from src.core.patch import Patch
 import re
 
 

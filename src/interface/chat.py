@@ -16,6 +16,7 @@ class Chat(ctk.CTkFrame):
         master,
         on_status_change=None,
         on_patch_preview=None,
+        on_generation_state_change=None,
         project_path=".",
         chat_history_storage=None,
         chat_history_manager=None
@@ -28,6 +29,7 @@ class Chat(ctk.CTkFrame):
 
         self.on_status_change = on_status_change
         self.on_patch_preview = on_patch_preview
+        self.on_generation_state_change = on_generation_state_change
         self.project_path = project_path
         self.active_chat = None
         self.is_generating = False
@@ -227,6 +229,9 @@ class Chat(ctk.CTkFrame):
         self.agent = self._create_agent()
 
     def _send_message(self):
+        if self.is_generating:
+            return
+
         message = self.message_entry.get().strip()
 
         if not message:
@@ -235,6 +240,12 @@ class Chat(ctk.CTkFrame):
         self.is_generating = True
         self.generation_id += 1
         generation_id = self.generation_id
+
+        if self.on_generation_state_change:
+            self.on_generation_state_change(True)
+
+        if self.on_patch_preview:
+            self.on_patch_preview([])
 
         if self.on_status_change:
             self.on_status_change("Thinking...")
@@ -253,9 +264,9 @@ class Chat(ctk.CTkFrame):
             )
 
         if (
-            self.active_chat is not None
-            and self.chat_history_storage is not None
-            and self.chat_history_manager is not None
+                self.active_chat is not None
+                and self.chat_history_storage is not None
+                and self.chat_history_manager is not None
         ):
             self.chat_history_storage.save(
                 self.chat_history_manager.get_all_chats()
@@ -324,6 +335,9 @@ class Chat(ctk.CTkFrame):
 
         return results
 
+    def reject_pending_modifications(self):
+        self.agent.pending_modifications = None
+
     def _update_patch_preview(self):
         if self.on_patch_preview is None:
             print("[CHAT] Patch preview callback is not configured.")
@@ -350,11 +364,11 @@ class Chat(ctk.CTkFrame):
         )
 
     def _generate_response(
-        self,
-        message,
-        generation_id,
-        generation_agent,
-        generation_chat
+            self,
+            message,
+            generation_id,
+            generation_agent,
+            generation_chat
     ):
         try:
             if message == "/list":
@@ -399,10 +413,19 @@ class Chat(ctk.CTkFrame):
             )
 
         except Exception as error:
+
+            error_traceback = traceback.format_exc()
+
             self.after(
+
                 0,
+
                 self._handle_error,
-                error
+
+                error,
+
+                error_traceback
+
             )
 
     def _update_patch_preview_for_generation(self, generation_agent):
@@ -411,10 +434,6 @@ class Chat(ctk.CTkFrame):
             return
 
         previews = generation_agent.get_patch_previews()
-
-        print(
-            f"[CHAT] Patch previews received: {len(previews)}"
-        )
 
         for preview in previews:
             print(
@@ -450,9 +469,9 @@ class Chat(ctk.CTkFrame):
             )
 
         if (
-            generation_chat is not None
-            and self.chat_history_storage is not None
-            and self.chat_history_manager is not None
+                generation_chat is not None
+                and self.chat_history_storage is not None
+                and self.chat_history_manager is not None
         ):
             self.chat_history_storage.save(
                 self.chat_history_manager.get_all_chats()
@@ -466,12 +485,15 @@ class Chat(ctk.CTkFrame):
 
         self.is_generating = False
 
+        if self.on_generation_state_change:
+            self.on_generation_state_change(False)
+
         if self.on_status_change:
             self.on_status_change("Ready")
 
-    def _handle_error(self, error):
+    def _handle_error(self, error, error_traceback):
         print("[CHAT] ERROR TRACEBACK:")
-        traceback.print_exc()
+        print(error_traceback)
 
         self._append_message(
             "Error",
@@ -480,8 +502,16 @@ class Chat(ctk.CTkFrame):
 
         self.is_generating = False
 
+        if self.on_patch_preview:
+            self.on_patch_preview([])
+
+        if self.on_generation_state_change:
+            self.on_generation_state_change(False)
+
         if self.on_status_change:
-            self.on_status_change("Error")
+            self.on_status_change(
+                f"Error: {error}"
+            )
 
     def _append_message(self, sender, message):
         self.chat_history.configure(

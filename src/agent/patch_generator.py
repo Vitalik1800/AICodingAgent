@@ -1,8 +1,8 @@
 from difflib import unified_diff
 
-from .modification import Modification
-from .modification_collection import ModificationCollection
-from .patch import Patch
+from src.core.modification import Modification
+from src.core.modification_collection import ModificationCollection
+from src.core.patch import Patch
 
 
 class PatchGenerator:
@@ -36,7 +36,9 @@ class PatchGenerator:
         return Patch(
             file_path=modification.file_path,
             content="".join(diff),
-            modification_type=modification.modification_type
+            modification_type=modification.modification_type,
+            original_content=modification.original_content,
+            new_content=modification.new_content
         )
 
     def generate_combined(self, modifications):

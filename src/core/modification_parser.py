@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from .modification import Modification
-from .modification_collection import ModificationCollection
+from src.core.modification import Modification
+from src.core.modification_collection import ModificationCollection
 
 
 class ModificationParser:
@@ -181,10 +181,15 @@ class ModificationParser:
         if modification_type not in {"update", "delete"}:
             return original_content
 
-        if original_content:
-            return original_content
+        current_content = self._load_current_content(normalized_path)
 
-        return self._load_current_content(normalized_path)
+        if original_content and original_content != current_content:
+            raise ValueError(
+                "Provided original_content does not match "
+                "current file content."
+            )
+
+        return current_content
 
     def _parse_modification(self, data):
         if not isinstance(data, dict):
@@ -244,6 +249,9 @@ class ModificationParser:
             )
 
         modification_type = modification_type.strip().lower()
+
+        if modification_type == "insertion":
+            modification_type = "update"
 
         if modification_type not in Modification.VALID_TYPES:
             raise ValueError(

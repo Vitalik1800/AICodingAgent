@@ -9,19 +9,26 @@ from .conversation import Conversation
 from .prompt_builder import PromptBuilder
 from .final_answer_parser import FinalAnswerParser
 from .context_formatter import ContextFormatter
-from .modification_pipeline import ModificationPipeline
-from .modification_response_parser import ModificationResponseParser
+from src.core.modification_pipeline import ModificationPipeline
+from src.core.modification_response_parser import ModificationResponseParser
 from copy import deepcopy
-from .apply_patch_service import ApplyPatchService
-from .modification_request_validator import ModificationRequestValidator
+from src.core.apply_patch_service import ApplyPatchService
+from src.core.modification_request_validator import ModificationRequestValidator
+from src.core.modification_requirement_validator import ModificationRequirementValidator
+
+from src.core.modification_semantic_validator import (
+    ModificationSemanticValidator
+)
 
 
 class Agent:
+    MAX_MODIFICATION_RETRIES = 5
+
     def __init__(
-        self,
-        llm_client,
-        project_path=".",
-        project_context=None
+            self,
+            llm_client,
+            project_path=".",
+            project_context=None
     ):
         self.llm_client = llm_client
         self.project_context = project_context
@@ -35,6 +42,8 @@ class Agent:
         self.modification_response_parser = ModificationResponseParser(project_path)
         self.apply_patch_service = ApplyPatchService(project_path)
         self.modification_request_validator = ModificationRequestValidator()
+        self.modification_requirement_validator = ModificationRequirementValidator()
+        self.semantic_validator = ModificationSemanticValidator()
         self.patch_previews = []
         self.pending_modifications = None
 
@@ -356,39 +365,104 @@ class Agent:
 
         text = message.lower().strip()
 
-        modification_keywords = (
-            "створи файл",
-            "створити файл",
-            "створи новий файл",
-            "створити новий файл",
-            "зміни файл",
-            "змінити файл",
-            "відредагуй файл",
-            "відредагувати файл",
-            "онови файл",
-            "оновити файл",
-            "видали файл",
-            "видалити файл",
-            "create file",
-            "create a file",
-            "create new file",
-            "create a new file",
-            "update file",
-            "update the file",
-            "edit file",
-            "edit the file",
-            "modify file",
-            "modify the file",
-            "delete file",
-            "delete the file",
-            "remove file",
-            "remove the file",
+        if not text:
+            return False
+
+        file_indicators = (
+            "файл",
+            "у файлі",
+            "у файл",
+            "в файлі",
+            "в файл",
+            "file",
         )
 
-        return any(
-            keyword in text
-            for keyword in modification_keywords
+        modification_operations = (
+            "створи",
+            "створити",
+            "створюй",
+            "створення",
+            "create",
+            "створи новий",
+            "створити новий",
+
+            "зміни",
+            "змінити",
+            "змінюй",
+            "онови",
+            "оновити",
+            "відредагуй",
+            "відредагувати",
+            "modify",
+            "update",
+            "edit",
+
+            "видали",
+            "видалити",
+            "видаляй",
+            "видалення",
+            "delete",
+            "remove",
         )
+
+        has_file_indicator = any(
+            indicator in text
+            for indicator in file_indicators
+        )
+
+        if not has_file_indicator:
+            return False
+
+        has_modification_operation = any(
+            operation in text
+            for operation in modification_operations
+        )
+
+        return has_modification_operation
+
+    def _get_previous_new_content(self, modification_response):
+        """
+        Extract new_content from a parsed modification response.
+
+        Supports:
+        - a list or tuple of modifications;
+        - a single modification object;
+        - dictionary-based modifications.
+        """
+
+        if not modification_response:
+            return ""
+
+        if isinstance(modification_response, (list, tuple)):
+            if not modification_response:
+                return ""
+
+            modification = modification_response[0]
+        else:
+            modification = modification_response
+
+        if isinstance(modification, dict):
+            content = (
+                    modification.get("new_content")
+                    or modification.get("content")
+                    or modification.get("file_content")
+                    or ""
+            )
+        else:
+            content = (
+                    getattr(modification, "new_content", None)
+                    or getattr(modification, "content", None)
+                    or getattr(modification, "file_content", None)
+                    or ""
+            )
+
+        if isinstance(content, list):
+            content = "\n".join(str(line) for line in content)
+
+        if not isinstance(content, str):
+            return ""
+
+        return content
 
     def run_tool_loop(self, message, max_tool_calls=5):
         self.conversation.add_message(
@@ -397,14 +471,31 @@ class Agent:
         )
 
         tool_calls_count = 0
+        modification_retries = 0
+
+        is_modification_request = (
+            self._is_modification_request(message)
+        )
+
+        requested_function = (
+            self.semantic_validator.extract_requested_function(
+                message
+            )
+        )
 
         while tool_calls_count < max_tool_calls:
             prompt = self._build_tool_loop_prompt()
 
-            response = self.llm_client.generate(prompt).strip()
+            response = self.llm_client.generate(
+                prompt
+            ).strip()
 
             print("\n[AGENT] LLM response:")
             print(response)
+
+            # =========================================================
+            # 1. TOOL CALL PARSING
+            # =========================================================
 
             try:
                 tool_call = self.tool_call_parser.parse(
@@ -412,6 +503,11 @@ class Agent:
                 )
 
             except ValueError:
+
+                # =====================================================
+                # 2. MODIFICATION RESPONSE PARSING
+                # =====================================================
+
                 try:
                     modification_response = (
                         self.modification_response_parser.parse(
@@ -419,24 +515,72 @@ class Agent:
                         )
                     )
 
-                except ValueError:
-                    if self._is_modification_request(message):
+                except (ValueError, TypeError) as error:
+
+                    # =================================================
+                    # 3. INVALID MODIFICATION RESPONSE
+                    # =================================================
+
+                    if is_modification_request:
+                        modification_retries += 1
+
                         print(
                             "[AGENT] Modification request requires "
-                            "a modification response."
+                            "a valid modification response."
                         )
 
+                        if (
+                                modification_retries
+                                >= self.MAX_MODIFICATION_RETRIES
+                        ):
+                            return (
+                                "The modification could not be generated "
+                                "in a valid format after multiple attempts."
+                            )
+
                         correction_message = (
-                            "Your previous response was invalid because "
-                            "the user requested a project file modification. "
-                            "You MUST NOT return a final_answer. "
-                            "Return ONLY a valid modification response "
-                            "containing the complete file modification. "
-                            "Use the correct modification_type: "
-                            "create, update, or delete. "
-                            "Do not explain the change. "
-                            "Do not use Markdown code fences. "
-                            "Return only the JSON object."
+                            "INVALID MODIFICATION RESPONSE.\n\n"
+                            f"Validation error: {error}\n\n"
+
+                            "The previous response was rejected.\n"
+                            "Return ONLY a valid modification JSON object.\n"
+                            "Do not return explanations.\n"
+                            "Do not return Markdown.\n"
+                            "Do not use code fences.\n"
+                            "Do not return final_answer.\n"
+                            "Do not return a shortened JSON format.\n\n"
+
+                            "REQUIRED STRUCTURE:\n"
+                            "{\n"
+                            '  "type": "modification",\n'
+                            '  "modifications": [\n'
+                            "    {\n"
+                            '      "file_path": "example1.py",\n'
+                            '      "original_content": "complete current file content",\n'
+                            '      "new_content": "complete updated file content",\n'
+                            '      "description": "short description",\n'
+                            '      "modification_type": "update"\n'
+                            "    }\n"
+                            "  ]\n"
+                            "}\n\n"
+
+                            "MANDATORY RULES:\n"
+                            "- Use exactly the required JSON structure.\n"
+                            "- modifications must be a list.\n"
+                            "- Include all required fields.\n"
+                            "- Use only create, update, or delete as modification_type.\n"
+                            "- Use update for an existing file.\n"
+                            "- Include the complete original file content.\n"
+                            "- Include the complete resulting file content.\n"
+                            "- Do not return only the new function.\n"
+                            "- Preserve all existing functions.\n"
+                            "- Preserve unrelated code and functionality.\n"
+                            "- Apply only the requested modification.\n"
+                        )
+
+                        self.conversation.add_message(
+                            "assistant",
+                            response
                         )
 
                         self.conversation.add_message(
@@ -446,9 +590,15 @@ class Agent:
 
                         continue
 
+                    # =================================================
+                    # 4. FINAL ANSWER PARSING
+                    # =================================================
+
                     try:
-                        final_answer = self.final_answer_parser.parse(
-                            response
+                        final_answer = (
+                            self.final_answer_parser.parse(
+                                response
+                            )
                         )
 
                     except ValueError:
@@ -475,28 +625,48 @@ class Agent:
 
                     return final_answer
 
+                # =====================================================
+                # 5. OPERATION VALIDATION
+                # =====================================================
+
                 try:
                     self.modification_request_validator.validate(
                         message,
                         modification_response
                     )
 
-                except ValueError as error:
+                except (ValueError, TypeError) as error:
+                    modification_retries += 1
+
                     print(
-                        "[AGENT] Modification rejected: "
-                        f"{error}"
+                        "[AGENT] Modification operation validation "
+                        f"failed: {error}"
                     )
 
+                    if (
+                            modification_retries
+                            >= self.MAX_MODIFICATION_RETRIES
+                    ):
+                        return (
+                            "The modification could not satisfy the "
+                            "requested operation after multiple attempts."
+                        )
+
                     correction_message = (
-                        "Your previous modification response was invalid "
-                        "because its modification_type does not match the "
-                        "operation requested by the user. "
-                        "Return ONLY a valid modification response using "
-                        "the correct operation: create, update, or delete. "
-                        "Do not return a final_answer. "
-                        "Do not explain the change. "
-                        "Do not use Markdown code fences. "
-                        "Return only the JSON object."
+                        "INVALID MODIFICATION OPERATION.\n\n"
+                        f"Validation error: {error}\n\n"
+                        "Return ONLY valid modification JSON.\n"
+                        "Use only these modification types: "
+                        "create, update, delete.\n"
+                        "For an existing file, use update.\n"
+                        "Preserve the complete existing file content.\n"
+                        "Do not return final_answer.\n"
+                        "Do not use Markdown code fences."
+                    )
+
+                    self.conversation.add_message(
+                        "assistant",
+                        response
                     )
 
                     self.conversation.add_message(
@@ -505,6 +675,191 @@ class Agent:
                     )
 
                     continue
+
+                # =====================================================
+                # 6. REQUIREMENT VALIDATION
+                # =====================================================
+
+                try:
+                    self.modification_requirement_validator.validate(
+                        message,
+                        modification_response
+                    )
+
+                except (ValueError, TypeError) as error:
+                    modification_retries += 1
+
+                    print(
+                        "[AGENT] Modification requirement validation "
+                        f"failed: {error}"
+                    )
+
+                    if (
+                            modification_retries
+                            >= self.MAX_MODIFICATION_RETRIES
+                    ):
+                        return (
+                            "The modification could not satisfy the "
+                            "user's explicit requirements."
+                        )
+
+                    required_lines = (
+                        self.modification_requirement_validator
+                        .get_required_line_count(message)
+                    )
+
+                    if isinstance(required_lines, tuple):
+                        minimum_lines, maximum_lines = required_lines
+
+                        line_requirement = (
+                            f"The new_content must contain between "
+                            f"{minimum_lines} and {maximum_lines} "
+                            "physical lines."
+                        )
+
+                    elif required_lines is not None:
+                        line_requirement = (
+                            f"The new_content must contain exactly "
+                            f"{required_lines} physical lines."
+                        )
+
+                    else:
+                        line_requirement = (
+                            "No specific line-count requirement was provided."
+                        )
+
+                    correction_message = (
+                        "INVALID MODIFICATION REQUIREMENTS.\n\n"
+                        f"Validation error: {error}\n\n"
+                        f"{line_requirement}\n"
+                        "Return the complete source code in new_content.\n"
+                        "Return ONLY valid modification JSON.\n"
+                        "Do not use Markdown code fences.\n"
+                        "Do not return final_answer.\n"
+                        "Preserve all existing functions and unrelated code."
+                    )
+
+                    self.conversation.add_message(
+                        "assistant",
+                        response
+                    )
+
+                    self.conversation.add_message(
+                        "user",
+                        correction_message
+                    )
+
+                    continue
+
+                # =====================================================
+                # 7. SEMANTIC VALIDATION
+                # =====================================================
+
+                if requested_function is not None:
+                    try:
+                        for modification in modification_response.get_all():
+
+                            original_functions = (
+                                self.semantic_validator._get_function_names(
+                                    modification.original_content
+                                )
+                            )
+
+                            new_functions = (
+                                self.semantic_validator._get_function_names(
+                                    modification.new_content
+                                )
+                            )
+
+                            # -------------------------------------------------
+                            # 7.1. Existing functions must not be deleted
+                            # -------------------------------------------------
+
+                            is_delete_request = any(
+                                phrase in message.lower()
+                                for phrase in (
+                                    "видали",
+                                    "видалити",
+                                    "delete",
+                                    "remove",
+                                )
+                            )
+
+                            if (
+                                    modification.modification_type == "update"
+                                    and not is_delete_request
+                            ):
+                                removed_functions = (
+                                        original_functions - new_functions
+                                )
+
+                                if removed_functions:
+                                    raise ValueError(
+                                        "Update removed existing functions: "
+                                        + ", ".join(sorted(removed_functions))
+                                    )
+
+                            # -------------------------------------------------
+                            # 7.2. Requested function validation
+                            # -------------------------------------------------
+
+                            if requested_function is not None:
+                                if requested_function in original_functions:
+                                    self.semantic_validator.validate(
+                                        modification,
+                                        requested_function=requested_function
+                                    )
+
+                    except (ValueError, TypeError) as error:
+                        modification_retries += 1
+
+                        print(
+                            "[AGENT] Modification semantic validation "
+                            f"failed: {error}"
+                        )
+
+                        if (
+                                modification_retries
+                                >= self.MAX_MODIFICATION_RETRIES
+                        ):
+                            return (
+                                "The modification failed semantic "
+                                "validation after multiple attempts."
+                            )
+
+                        correction_message = (
+                            "INVALID MODIFICATION CONTENT.\n\n"
+                            f"Validation error: {error}\n\n"
+
+                            "Return ONLY valid modification JSON.\n"
+                            "Do not use Markdown code fences.\n"
+                            "Do not return final_answer.\n\n"
+
+                            "IMPORTANT:\n"
+                            "- Preserve every existing function.\n"
+                            "- Do not remove unrelated code.\n"
+                            "- Do not replace the file with only the new function.\n"
+                            "- Include the complete original_content.\n"
+                            "- Include the complete new_content.\n"
+                            "- Add only the function requested by the user.\n"
+                            "- For an existing file, use modification_type 'update'.\n"
+                        )
+
+                        self.conversation.add_message(
+                            "assistant",
+                            response
+                        )
+
+                        self.conversation.add_message(
+                            "user",
+                            correction_message
+                        )
+
+                        continue
+
+                # =====================================================
+                # 8. SUCCESSFUL MODIFICATION
+                # =====================================================
 
                 print(
                     "[AGENT] Modification response received."
@@ -515,7 +870,9 @@ class Agent:
                     response
                 )
 
-                self.pending_modifications = modification_response
+                self.pending_modifications = (
+                    modification_response
+                )
 
                 previews = self.preview_modifications(
                     modification_response
@@ -523,13 +880,17 @@ class Agent:
 
                 print(
                     f"[AGENT] Generated {len(previews)} "
-                    f"patch preview(s)."
+                    "patch preview(s)."
                 )
 
                 return (
                     f"Generated {len(previews)} patch preview(s). "
                     "Review the changes in the Patch Preview panel."
                 )
+
+            # =========================================================
+            # 9. TOOL CALL EXECUTION
+            # =========================================================
 
             print(
                 f"[AGENT] Tool call: {tool_call.tool}"
@@ -555,22 +916,21 @@ class Agent:
                 tool_call
             )
 
-            print(
-                "[AGENT] Tool result:"
-            )
-
-            print(
-                self.format_tool_result(tool_result)
-            )
-
             tool_result_text = self.format_tool_result(
                 tool_result
             )
+
+            print("[AGENT] Tool result:")
+            print(tool_result_text)
 
             self.conversation.add_message(
                 "tool",
                 tool_result_text
             )
+
+        # =============================================================
+        # 10. MAXIMUM TOOL CALLS
+        # =============================================================
 
         print(
             "[AGENT] Maximum number of tool calls reached."

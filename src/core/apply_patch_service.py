@@ -1,7 +1,7 @@
-from .apply_result import ApplyResult
-from .modification import Modification
-from .modification_safety import ModificationSafety
-from .patch_applier import PatchApplier
+from src.agent.apply_result import ApplyResult
+from src.core.modification import Modification
+from src.core.modification_safety import ModificationSafety
+from src.agent.patch_applier import PatchApplier
 
 
 class ApplyPatchService:

@@ -7,6 +7,10 @@ class PatchPreview:
     file_path: Path
     patch_content: str
     modification_type: str
+    original_content: str = ""
+    new_content: str = ""
+
+    VALID_TYPES = {"create", "update", "delete"}
 
     def __post_init__(self):
         self.file_path = Path(self.file_path)
@@ -17,10 +21,17 @@ class PatchPreview:
         if not isinstance(self.patch_content, str):
             raise TypeError("Patch preview content must be a string.")
 
-        if not isinstance(self.modification_type, str):
-            raise TypeError("Patch preview modification type must be a string.")
+        if not isinstance(self.original_content, str):
+            raise TypeError(
+                "Patch preview original content must be a string."
+            )
 
-        if self.modification_type not in {"create", "update", "delete"}:
+        if not isinstance(self.new_content, str):
+            raise TypeError(
+                "Patch preview new content must be a string."
+            )
+
+        if self.modification_type not in self.VALID_TYPES:
             raise ValueError(
                 f"Unsupported patch preview type: {self.modification_type}"
             )
@@ -39,6 +50,10 @@ class PatchPreview:
     @property
     def is_delete(self):
         return self.modification_type == "delete"
+
+    @property
+    def has_changes(self):
+        return self.original_content != self.new_content
 
     def __repr__(self):
         return (

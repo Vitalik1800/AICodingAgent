@@ -1,5 +1,5 @@
-from .patch import Patch
-from .patch_preview import PatchPreview
+from src.core.patch import Patch
+from src.core.patch_preview import PatchPreview
 
 
 class PatchPreviewBuilder:
@@ -12,7 +12,9 @@ class PatchPreviewBuilder:
         return PatchPreview(
             file_path=patch.file_path,
             patch_content=patch.content,
-            modification_type=patch.modification_type
+            modification_type=patch.modification_type,
+            original_content=patch.original_content,
+            new_content=patch.new_content
         )
 
     def build_all(self, patches):

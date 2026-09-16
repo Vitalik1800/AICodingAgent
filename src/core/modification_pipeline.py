@@ -1,9 +1,9 @@
-from .modification import Modification
-from .modification_safety import ModificationSafety
-from .modification_parser import ModificationParser
-from .patch_generator import PatchGenerator
-from .patch_validator import PatchValidator
-from .patch_preview_builder import PatchPreviewBuilder
+from src.core.modification import Modification
+from src.core.modification_safety import ModificationSafety
+from src.core.modification_parser import ModificationParser
+from src.agent.patch_generator import PatchGenerator
+from src.agent.patch_validator import PatchValidator
+from src.agent.patch_preview_builder import PatchPreviewBuilder
 
 
 class ModificationPipeline:
@@ -21,11 +21,25 @@ class ModificationPipeline:
 
         self.safety.validate(modification)
 
-        patch = self.generator.generate(modification)
+        if modification.modification_type == "update":
+            if not self._has_meaningful_changes(
+                    modification.original_content,
+                    modification.new_content
+            ):
+                raise ValueError(
+                    "Update modification does not contain meaningful changes."
+                )
 
+        patch = self.generator.generate(modification)
         self.validator.validate(patch)
 
         return patch
+
+    def _has_meaningful_changes(self, original_content, new_content):
+        return (
+                original_content.strip()
+                != new_content.strip()
+        )
 
     def process_preview(self, modification):
         patch = self.process(modification)

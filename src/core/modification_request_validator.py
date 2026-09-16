@@ -1,4 +1,4 @@
-from .modification import Modification
+from src.core.modification import Modification
 
 
 class ModificationRequestValidator:

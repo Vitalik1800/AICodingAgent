@@ -109,6 +109,7 @@ class App:
             self.root,
             on_status_change=self._handle_status_change,
             on_patch_preview=self._handle_patch_preview,
+            on_generation_state_change=self._handle_generation_state_change,
             project_path=".",
             chat_history_storage=self.chat_history_storage,
             chat_history_manager=self.chat_history_manager
@@ -122,7 +123,8 @@ class App:
 
         self.patch_preview_panel = PatchPreviewPanel(
             self.root,
-            on_apply=self._apply_patch_changes
+            on_apply=self._apply_patch_changes,
+            on_reject=self._reject_patch_changes
         )
 
         self.patch_preview_panel.grid(
@@ -353,7 +355,14 @@ class App:
             previews
         )
 
+    def _handle_generation_state_change(self, is_generating):
+        self.patch_preview_panel.set_busy(
+            is_generating
+        )
+
     def _apply_patch_changes(self):
+        self.patch_preview_panel.set_busy(True)
+
         try:
             results = self.chat.apply_pending_modifications()
 
@@ -401,6 +410,24 @@ class App:
         except Exception as error:
             self._handle_status_change(
                 f"Apply error: {error}"
+            )
+
+        finally:
+            self.patch_preview_panel.set_busy(False)
+
+    def _reject_patch_changes(self):
+        try:
+            self.chat.reject_pending_modifications()
+
+            self.patch_preview_panel.clear()
+
+            self.status_bar.set_status(
+                "Changes rejected"
+            )
+
+        except Exception as error:
+            self._handle_status_change(
+                f"Reject error: {error}"
             )
 
     def run(self):
